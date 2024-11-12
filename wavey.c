@@ -7,7 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define FPS 4 //Frame rate of visual, also my sample rate of audio data
+#define FPS 20 //Frame rate of visual, also my sample rate of audio data
+#define s_factor 10 //Factor by which to smoothen the data. (lose hi end freqs)
+
 
 // ### Fourier Transform ###
 
@@ -22,7 +24,7 @@ typedef struct {
 } cnum;
 
 //cnum magnitude function
-double mag(cnum z) {
+float mag(cnum z) {
 	return sqrt(z.re * z.re + z.im * z.im);
 }
 
@@ -35,12 +37,6 @@ cnum multiply(cnum w, cnum z) {
 cnum factor(int n, int k, int N, int sign) {
 	return (cnum){cos(2*M_PI*n*k/N),sin(sign*2*M_PI*n*k/N)};
 }
-
-//write complex numbers to a file
-void writefile(FILE *f,double t, cnum h){
-	fprintf(f, "%lf,%lf,%lf\n", t, h.re, h.im);
-}
-
 
 
 //DFT or IDFT depending on the first parameter
@@ -155,8 +151,8 @@ int main(int argc, char *argv[]) {
 
     fseek(file, sizeof(WAVHeader), SEEK_SET);
     int oneChannelLength = header.subchunk2Size * 8 / header.bitsPerSample / 2;
-    int numRows = oneChannelLength * 2 * FPS / (header.sampleRate);
-    int numCols = oneChannelLength / numRows;
+    int numRows = oneChannelLength * FPS / (header.sampleRate);
+    int numCols = oneChannelLength / numRows / s_factor;
     size_t rows_size = numRows * sizeof(cnum *);
 
     cnum **leftData = (cnum**)malloc(rows_size);
@@ -176,69 +172,92 @@ int main(int argc, char *argv[]) {
 
     for (int row = 0; row < numRows; row++) {
         for (int col = 0; col < numCols; col++) {
+            for (int i=0; i<s_factor;i++) {
+                if (fread(&sample, sizeof(int16_t), 1, file) != 1) {
+                    perror("Error reading from left channel");
+                    fclose(file);
+                    return 1;
+                }
+                leftData[row][col].re += (float)sample;
 
-            if (fread(&sample, sizeof(int16_t), 1, file) != 1) {
-                printf("row: %d, col: %d",row,col);
-                perror("Error reading from left channel");
-                fclose(file);
-                return 1;
+                if (fread(&sample, sizeof(int16_t), 1, file) != 1) {
+                    perror("Error reading from right channel");
+                    fclose(file);
+                    return 1;
+                }
+                rightData[row][col].re += (float)sample;
             }
-            leftData[row][col].re = (float)sample;
+            leftData[row][col].re /= s_factor;
+            rightData[row][col].re /= s_factor;
             leftData[row][col].im = 0.0f;
-
-            if (fread(&sample, sizeof(int16_t), 1, file) != 1) {
-                perror("Error reading from right channel");
-                fclose(file);
-                return 1;
-            }
-            rightData[row][col].re = (float)sample;
             rightData[row][col].im = 0.0f;
         }
     }
 
     fclose(file);
 
-    /* Output Test
+    /*Output Test for now smoothened data
     float rowTime;
     float colTime;
 
     for (int row = 0; row < 1; row++) {
         rowTime = row/FPS;
         for (int col = 0; col < 50; col++) {
-            colTime = col/(float)header.sampleRate;
+            colTime = col/(float)header.sampleRate * s_factor;
             printf("%.5f:\t%.3f + %.3fi\t%.3f + %.3fi\n", rowTime+colTime, leftData[row][col].re, leftData[row][col].im,rightData[row][col].re, rightData[row][col].im);
         }
         printf("\n");
     }
     */
+    
+    // ### DFT time :p ###
 
-    // Free allocated memory
+
+    FILE *file2 = fopen("wave_output.txt","w");
+    if (file2 == NULL) {
+    perror("Failed to open file");
+    return 1;
+    } 
+
+    fprintf(file2,"time");
+
+    for (int col=0;col<numCols/2;col++) {
+        fprintf(file2,",%d",col*44100/numCols/s_factor);
+    }
+
+    fprintf(file2,"\n");
+
+
+    for (int row = 0; row < numRows; row++) {
+        cnum *leftDFT = transform(DFT,leftData[row],numCols);
+        cnum *rightDFT = transform(DFT,rightData[row],numCols);
+        fprintf(file2,"%.5f",(float)row/FPS);
+
+        for (int i = 0; i<numCols/2; i++) {
+            fprintf(file2,",%.3f",(mag(leftDFT[i]) + mag(rightDFT[i])) / 2);
+        }
+        fprintf(file2,"\n");
+        /*Output Test
+        for (int i=0;i<numCols;i++) {
+        printf("%d: %.3f\n",i*44100/numCols/s_factor,mags[row][i]);
+        }
+        */
+
+        free(leftDFT);
+        free(rightDFT);
+    }
+
+    fclose(file2);
+
     for (int row = 0; row < numRows; row++) {
         free(leftData[row]);
         free(rightData[row]);
     }
     
-    printf("\nLength of a channel: %d\n",oneChannelLength);
-
-    /*  output check
-    float realTime;
-    for (i=0;i<50;i++) {
-        realTime = i/(float)header.sampleRate;
-        printf("%.5f:\t%.3f + %.3fi\t%.3f + %.3fi\n",realTime,leftData[i].re,leftData[i].im,rightData[i].re,rightData[i].im);
-    }
-    */
     
-    // ### DFT time :p ###
-
-    for (int row = 0; row < numRows; row++) {
-
-        cnum *leftDFT = transform(DFT,leftData[row],numCols);
-        cnum *rightDFT = transform(DFT,rightData[row],numCols);
-        
-    }
-
     free(leftData);
     free(rightData);
 
+    printf("Done!\n");
     return 0;
 }
